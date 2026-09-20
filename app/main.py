@@ -23,9 +23,13 @@ from . import sandbox as sandbox_svc
 from .backfill import BackfillError
 from . import backfill as backfill_svc
 from . import relief as relief_svc
+from .audit import AuditError
+from . import audit as audit_svc
 from .schemas import (
     BackfillAdoptIn,
     BackfillPreviewIn,
+    BatchCreateIn,
+    BatchRollbackIn,
     ConflictIn,
     DeclarationSubmitIn,
     LockIn,
@@ -66,6 +70,15 @@ def sandbox_error_handler(request: Request, exc: SandboxError):
 @app.exception_handler(BackfillError)
 def backfill_error_handler(request: Request, exc: BackfillError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
+
+
+@app.exception_handler(AuditError)
+def audit_error_handler(request: Request, exc: AuditError):
+    # 回滚整单拒绝时，detail 给出文字说明，blockers 给出逐条结构化原因
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message, "blockers": exc.blockers},
+    )
 
 
 # ------------------------------------------------------------- 状态序列化
@@ -135,6 +148,8 @@ def build_state(conn: sqlite3.Connection) -> dict:
         # 利益冲突自助申报链接状态（不含令牌明文/哈希）
         "declarations": decl_svc.list_declarations(conn),
         "solution": solution,
+        # 分配批次审计：时间线仅含元数据（快照正文按需经 /api/batches/{id} 拉取）
+        "batches": audit_svc.list_batches(conn),
     }
 
 
@@ -418,6 +433,63 @@ def relief_suggestions(conn=Depends(get_conn)):
     return relief_svc.suggest(conn)
 
 
+# ------------------------------------------------------------- 分配批次审计
+@app.post("/api/batches")
+def create_batch(body: BatchCreateIn, conn=Depends(get_conn)):
+    """把当前分配固化为**不可变**批次快照（配对/主审标记/锁定/冲突/参数/备注）。
+
+    建议在成功求解或锁定变更后创建；批次一经写入不可修改或删除。
+    """
+    meta = audit_svc.create_batch(conn, note=body.note)
+    return build_state(conn) | {"batch": meta}
+
+
+@app.get("/api/batches")
+def list_batches(conn=Depends(get_conn)):
+    """批次时间线（按时间升序，仅元数据；不含快照正文）。"""
+    return {"batches": audit_svc.list_batches(conn)}
+
+
+@app.get("/api/batches/{batch_id}")
+def get_batch(batch_id: int, conn=Depends(get_conn)):
+    """批次详情：元数据 + 完整不可变快照 + 完整性校验结果。"""
+    return audit_svc.get_batch(conn, batch_id)
+
+
+@app.get("/api/batches/{base_id}/diff/{target_id}")
+def diff_batches(base_id: int, target_id: int, conn=Depends(get_conn)):
+    """按时间查看两个批次的差异：target 相对 base 的配对/冲突/参数/实体变化。"""
+    return audit_svc.diff_batches(conn, base_id, target_id)
+
+
+@app.post("/api/batches/{batch_id}/rollback/preview")
+def rollback_preview(batch_id: int, conn=Depends(get_conn)):
+    """按批次原子回滚的**只读预检**：在内存影子库中模拟，不写入真实数据。
+
+    返回是否可回滚（can_rollback）、逐条阻塞原因（blockers：已删除对象 /
+    当前锁定冲突等）、预计配对/冲突/参数/实体属性差异、未能恢复的历史自由
+    配对与重算告警。
+    """
+    return audit_svc.preview_rollback(conn, batch_id)
+
+
+@app.post("/api/batches/{batch_id}/rollback")
+def rollback_batch(batch_id: int, body: BatchRollbackIn, conn=Depends(get_conn)):
+    """按批次原子回滚：预检通过后在单个事务内恢复快照状态并重算。
+
+    仅恢复快照中仍存在的稿件/评审人属性、配对（锁定/主审）与冲突约束，
+    批次之后新建的实体保留；遇已删除对象或当前锁定冲突则**整单 409 拒绝**
+    （响应 blockers 逐条说明原因），不做任何部分写入。
+    成功后写入一个 kind='rollback' 的新批次（指向来源批次），历史批次不改写。
+    """
+    result = audit_svc.rollback(conn, batch_id, note=body.note)
+    return build_state(conn) | {
+        "batch": result["rollback_batch"],
+        "source_batch_id": result["source_batch_id"],
+        "solution": result["solution"],
+    }
+
+
 @app.post("/api/assignments/lock")
 def toggle_lock(body: LockIn, conn=Depends(get_conn)):
     _get_or_404(conn, "manuscripts", body.manuscript_id, "稿件")
@@ -495,6 +567,8 @@ def toggle_lock(body: LockIn, conn=Depends(get_conn)):
 @app.post("/api/demo")
 def load_demo(conn=Depends(get_conn)):
     with transaction(conn):
+        # 批次快照绑定稿件/评审人 ID：重置实体后旧批次不再可回滚，一并清空
+        conn.execute("DELETE FROM assignment_batches")
         conn.execute("DELETE FROM assignments")
         conn.execute("DELETE FROM conflicts")
         conn.execute("DELETE FROM conflict_declarations")
@@ -509,6 +583,7 @@ def load_demo(conn=Depends(get_conn)):
 @app.post("/api/reset")
 def reset_all(conn=Depends(get_conn)):
     with transaction(conn):
+        conn.execute("DELETE FROM assignment_batches")
         conn.execute("DELETE FROM assignments")
         conn.execute("DELETE FROM conflicts")
         conn.execute("DELETE FROM conflict_declarations")

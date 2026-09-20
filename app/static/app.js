@@ -814,6 +814,264 @@ function clearSandboxTouched() {
   }
 }
 
+/* --------------------------------------------------------------- 分配批次审计 */
+let batchDiff = null;        // 两批次差异结果
+let rollbackPreview = null;  // 回滚预检结果
+
+function batchOption(b) {
+  const kind = b.kind === "rollback"
+    ? `↩️ 回滚批次（来源 #${b.rollback_of}）`
+    : "📸 快照批次";
+  return `<option value="${b.id}">#${b.id} · ${esc(b.created_at)} · ${kind}${
+    b.note ? " · " + esc(b.note) : ""}</option>`;
+}
+
+function fillBatchSelect(sel, batches, defaultPick) {
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = batches.length
+    ? batches.map((b) => batchOption(b)).join("")
+    : '<option value="">（尚无批次）</option>';
+  // 优先保留用户已选；否则按默认值（差异对比默认最后两个批次）
+  const validIds = new Set(batches.map((b) => String(b.id)));
+  if (prev && validIds.has(prev)) sel.value = prev;
+  else if (defaultPick != null && validIds.has(String(defaultPick))) sel.value = defaultPick;
+}
+
+function renderBatchSelectors() {
+  const batches = state.batches || [];
+  const last = batches.length ? batches[batches.length - 1].id : null;
+  const secondLast = batches.length >= 2 ? batches[batches.length - 2].id : null;
+  fillBatchSelect($("#diff-base"), batches, secondLast);
+  fillBatchSelect($("#diff-target"), batches, last);
+  fillBatchSelect($("#rb-batch"), batches, last);
+}
+
+function renderBatches() {
+  renderBatchSelectors();
+  const box = $("#batch-list");
+  if (!box) return;
+  const batches = state.batches || [];
+  if (!batches.length) {
+    box.innerHTML = `<div class="empty">尚无批次。请在成功求解或锁定变更后，在上方填写备注并「创建批次快照」。</div>`;
+    return;
+  }
+  box.innerHTML = batches.map((b, idx) => {
+    const isRb = b.kind === "rollback";
+    const badge = isRb
+      ? `<span class="batch-kind rb">↩️ 回滚批次</span>`
+      : `<span class="batch-kind snap">📸 快照批次</span>`;
+    const source = isRb ? ` · 来源批次 <strong>#${b.rollback_of}</strong>` : "";
+    const prev = idx > 0 ? batches[idx - 1] : null;
+    const diffBtns = prev
+      ? `<button class="btn small" data-diff="${prev.id}" data-diff-target="${b.id}">与 #${prev.id} 对比</button>`
+      : "";
+    return `<div class="entity-row batch-row" data-batch="${b.id}">
+      <div class="entity-main">
+        <div class="entity-title">#${b.id} ${badge}
+          ${b.note ? `<span class="batch-note">${esc(b.note)}</span>` : ""}</div>
+        <div class="entity-sub">
+          ${esc(b.created_at)}${source} ｜
+          配对 ${b.pair_count}（🔒 ${b.locked_count} · ⭐ ${b.lead_count}）· 冲突 ${b.conflict_count}
+        </div>
+      </div>
+      <div class="entity-actions">
+        ${diffBtns}
+        <button class="btn small" data-batch-detail="${b.id}">查看快照</button>
+        <button class="btn small" data-rb-select="${b.id}">回滚到此</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function pairLine(x, sign) {
+  const lead = x.is_lead ? ' <span class="tag lead-tag">⭐ 主审</span>' : "";
+  const lock = x.locked ? ' <span class="tag locked-tag">🔒 锁定</span>' : "";
+  return `<li>${sign} 《${esc(x.manuscript_title || `#${x.manuscript_id}`)}》 ← ${
+    esc(x.reviewer_name || `#${x.reviewer_id}`)}${lead}${lock}</li>`;
+}
+
+function diffPairsHtml(d) {
+  const renderItems = (items, sign, empty) =>
+    items.length ? `<ul>${items.map((x) => pairLine(x, sign)).join("")}</ul>`
+                 : `<div class="hint">${empty}</div>`;
+  const changed = (d.changed || []).map((c) => {
+    const tags = [];
+    if (c.locked_before !== c.locked_after)
+      tags.push(c.locked_after ? "自由 → 🔒锁定" : "🔒锁定 → 自由");
+    if (c.lead_before !== c.lead_after)
+      tags.push(c.lead_after ? "非主审 → ⭐主审" : "⭐主审 → 非主审");
+    return `<li>《${esc(c.pair.manuscript_title || `#${c.pair.manuscript_id}`)}》 ← ${
+      esc(c.pair.reviewer_name || `#${c.pair.reviewer_id}`)}：${tags.join("、")}</li>`;
+  }).join("");
+  return `<div class="sandbox-diff" style="display:block">
+    <div class="sandbox-diff">
+      <div><h4>➕ 新增配对（${d.added.length}）</h4>${renderItems(d.added, "➕", "无新增配对")}</div>
+      <div><h4>➖ 移除配对（${d.removed.length}）</h4>${renderItems(d.removed, "➖", "无移除配对")}</div>
+    </div>
+    ${changed ? `<h4 style="margin:8px 0 4px;font-size:13px">🔄 锁定/主审状态变化（${d.changed.length}）</h4><ul>${changed}</ul>` : ""}
+  </div>`;
+}
+
+function conflictsHtml(c) {
+  const fmt = (list) => list.map(([m, r]) => `稿件 #${m} / 评审人 #${r}`).join("、");
+  const parts = [];
+  if (c.added.length) parts.push(`<li>➕ 新增冲突：${c.added.map(([m, r]) => `(#${m}, #${r})`).join("、")}</li>`);
+  if (c.removed.length) parts.push(`<li>➖ 移除冲突：${c.removed.map(([m, r]) => `(#${m}, #${r})`).join("、")}</li>`);
+  return parts.length ? `<ul class="bf-notices">${parts.join("")}</ul>`
+                      : `<div class="hint">冲突约束无变化</div>`;
+}
+
+function paramsHtml(p) {
+  const names = { mismatch_weight: "主题不匹配权重 β", load_weight: "负载权重 α", institution_cap: "同机构上限 γ" };
+  const keys = Object.keys(p || {});
+  if (!keys.length) return `<div class="hint">求解参数无变化</div>`;
+  return `<table class="sandbox-metrics">
+    <tr><th>参数</th><th>基准</th><th>目标</th></tr>
+    ${keys.map((k) => `<tr><td>${names[k] || k}</td><td>${p[k].before ?? "—"}</td><td>${p[k].after ?? "—"}</td></tr>`).join("")}
+  </table>`;
+}
+
+function entityDiffHtml(group) {
+  if (!group) return "";
+  const ch = group.changed || [];
+  if (!ch.length) return "";
+  const rows = ch.map((c) => {
+    const nameField = group.label === "稿件" ? "title" : "name";
+    return `<tr><td>#${c.id} ${esc(c.before[nameField] || "")}</td>
+      <td>${esc(JSON.stringify(c.before))}</td>
+      <td>→</td>
+      <td>${esc(JSON.stringify(c.after))}</td></tr>`;
+  }).join("");
+  return `<details style="margin-top:6px"><summary class="hint">${group.label}属性变化（${ch.length}）</summary>
+    <table class="sandbox-metrics"><tr><th>对象</th><th>变化前</th><th></th><th>变化后</th></tr>${rows}</table></details>`;
+}
+
+function renderBatchDiff() {
+  const box = $("#batch-diff-result");
+  if (!box) return;
+  if (!batchDiff) { box.innerHTML = ""; return; }
+  const d = batchDiff;
+  const totalPairs = d.pairs.added.length + d.pairs.removed.length + d.pairs.changed.length;
+  const totalConf = d.conflicts.added.length + d.conflicts.removed.length;
+  box.innerHTML = `<div class="sandbox-result-inner">
+    <div class="sandbox-meta">
+      批次 #${d.base_id} → #${d.target_id} ｜ 配对变化 ${totalPairs} 处 · 冲突变化 ${totalConf} 处 ·
+      参数变化 ${Object.keys(d.params).length} 项 · 生成于 ${esc(d.created_at)}
+    </div>
+    <h4 style="margin:10px 0 4px;font-size:13px">稿件—评审人配对</h4>
+    ${diffPairsHtml(d.pairs)}
+    <h4 style="margin:10px 0 4px;font-size:13px">作者冲突约束</h4>
+    ${conflictsHtml(d.conflicts)}
+    <h4 style="margin:10px 0 4px;font-size:13px">求解参数</h4>
+    ${paramsHtml(d.params)}
+    ${entityDiffHtml(d.manuscripts)}
+    ${entityDiffHtml(d.reviewers)}
+  </div>`;
+}
+
+async function showBatchDetail(batchId) {
+  try {
+    const b = await api(`/api/batches/${batchId}`);
+    const snap = b.snapshot;
+    const pairList = snap.pairs.map((p) => {
+      const m = (snap.manuscripts.find((x) => x.id === p.manuscript_id) || {}).title || `#${p.manuscript_id}`;
+      const r = (snap.reviewers.find((x) => x.id === p.reviewer_id) || {}).name || `#${p.reviewer_id}`;
+      return pairLine({ manuscript_title: m, reviewer_name: r, is_lead: p.is_lead, locked: p.locked }, "•");
+    }).join("");
+    $("#modal-title").textContent = `批次 #${b.id} 不可变快照${b.kind === "rollback" ? "（↩️ 回滚批次）" : ""}`;
+    $("#modal-body").innerHTML = `
+      <div class="sandbox-meta">${esc(b.created_at)} · ${b.intact ? "✅ 完整性校验通过" : "⚠️ 快照哈希不一致"}
+        ${b.rollback_of ? ` · 来源批次 #${b.rollback_of}` : ""}</div>
+      ${b.note ? `<p style="margin:8px 0 0"><strong>备注：</strong>${esc(b.note)}</p>` : ""}
+      <p class="hint" style="margin-top:8px">参数：β=${snap.params.mismatch_weight} · α=${snap.params.load_weight} · γ=${snap.params.institution_cap}
+        ｜稿件 ${snap.manuscripts.length} · 评审人 ${snap.reviewers.length} · 配对 ${snap.pairs.length} · 冲突 ${snap.conflicts.length}</p>
+      <div style="max-height:46vh;overflow:auto;margin-top:8px">
+        <h4 style="font-size:13px;margin:4px 0">配对（含主审/锁定标记）</h4>
+        <ul style="font-size:12.5px;padding-left:18px">${pairList || '<span class="hint">（无配对）</span>'}</ul>
+        <h4 style="font-size:13px;margin:8px 0 4px">冲突约束（${snap.conflicts.length}）</h4>
+        <div class="hint" style="font-size:12px">${
+          snap.conflicts.map(([m, r]) => `(#${m}, #${r})`).join("、") || "（无冲突）"}</div>
+      </div>`;
+    $("#modal-ok").textContent = "关闭";
+    $("#modal").classList.remove("hidden");
+    const cleanup = () => {
+      $("#modal").classList.add("hidden");
+      $("#modal-ok").textContent = "确定";
+      $("#modal-ok").onclick = null;
+      $("#modal-cancel").onclick = null;
+    };
+    $("#modal-ok").onclick = cleanup;
+    $("#modal-cancel").onclick = cleanup;
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderRollback() {
+  const box = $("#rollback-result");
+  if (!box) return;
+  const runBtn = $("#btn-rb-run");
+  const clearBtn = $("#btn-rb-clear");
+  if (!rollbackPreview) {
+    box.innerHTML = "";
+    runBtn.disabled = true;
+    clearBtn.disabled = true;
+    return;
+  }
+  const p = rollbackPreview;
+  clearBtn.disabled = false;
+  const b = p.batch;
+
+  if (!p.can_rollback) {
+    runBtn.disabled = true;
+    box.innerHTML = `<div class="sandbox-result-inner stale">
+      <div class="alert danger" style="margin:0 0 10px">
+        <strong>⛔ 回滚预检未通过：发现 ${p.blockers.length} 项阻塞，整单拒绝（未写入任何内容）。</strong>
+        <ul>${p.blockers.map((x) => `<li>${esc(x.message)}</li>`).join("")}</ul>
+      </div>
+      <div class="sandbox-meta">目标批次 #${b.id}${b.note ? " · " + esc(b.note) : ""} · ${esc(b.created_at)}。
+        请按上述原因处理（删除对象无法恢复，请改选其他批次；锁定冲突请先在「分配结果」页解锁）后重新预检。</div>
+    </div>`;
+    return;
+  }
+
+  runBtn.disabled = false;
+  const d = p.diff;
+  const unrestoredHtml = p.unrestored_free_pairs.length
+    ? `<div class="sandbox-unmet"><strong>⚠️ 以下历史自由配对因当前容量/需求等硬约束无法恢复（${p.unrestored_free_pairs.length}），
+       将由求解器按最小改动补齐：</strong>
+       <ul>${p.unrestored_free_pairs.map((x) => pairLine(x, "⚠️")).join("")}</ul></div>`
+    : `<div class="sandbox-unmet ok">✅ 批次中的历史自由配对均可恢复。</div>`;
+  const warnHtml = p.warnings.length
+    ? `<details style="margin-top:8px"><summary class="hint">重算警告（${p.warnings.length}，如恢复的锁定超出当前需求/容量）</summary>
+       <ul class="bf-notices">${p.warnings.map((w) => `<li>${esc(w.message)}</li>`).join("")}</ul></details>`
+    : "";
+  const unmet = (p.metrics.unmet || []);
+  const unmetHtml = unmet.length
+    ? `<div class="sandbox-unmet"><strong>回滚重算后仍有 ${unmet.length} 篇未满足：</strong><ul>` +
+      unmet.map((u) => `<li>《${esc(u.title || `#${u.manuscript_id}`)}》：缺 ${u.deficit} 名` +
+        (u.lead_deficit > 0 ? ` · 主审缺 ${u.lead_deficit}` : "") + "</li>").join("") +
+      `</ul></div>`
+    : `<div class="sandbox-unmet ok">✅ 回滚重算后全部需求满足。</div>`;
+
+  box.innerHTML = `<div class="sandbox-result-inner">
+    <div class="sandbox-meta">目标批次 #${b.id}${b.note ? " · " + esc(b.note) : ""} · ${esc(b.created_at)}
+      ｜预检生成于 ${esc(p.created_at)} ✅ 无阻塞</div>
+    <h4 style="margin:10px 0 4px;font-size:13px">预计配对变化</h4>
+    ${diffPairsHtml(d.pairs)}
+    <h4 style="margin:10px 0 4px;font-size:13px">预计冲突约束变化</h4>
+    ${conflictsHtml(d.conflicts)}
+    <h4 style="margin:10px 0 4px;font-size:13px">求解参数将恢复为</h4>
+    ${paramsHtml(d.params)}
+    ${entityDiffHtml(d.manuscripts)}
+    ${entityDiffHtml(d.reviewers)}
+    ${unrestoredHtml}
+    ${unmetHtml}
+    ${warnHtml}
+    <div class="sandbox-meta">执行后：仅恢复批次内仍存在实体的属性、配对与冲突（批次之后新建的稿件/评审人保留）；
+      恢复快照锁定，自由配对以历史配对优先重算；成功后<strong>新增一个回滚批次（#${b.id} → 新批次）</strong>，历史批次不改写。</div>
+  </div>`;
+}
+
 function render() {
   indexMaps();
   renderSummary();
@@ -828,6 +1086,9 @@ function render() {
   renderSandbox();
   renderBackfill();
   renderRelief();
+  renderBatches();
+  renderBatchDiff();
+  renderRollback();
 }
 
 /* --------------------------------------------------------------- 通用编辑弹窗 */
@@ -1234,6 +1495,123 @@ function bindEvents() {
   // 记录用户是否手动改过默认输入框
   $$('form input[name="required_reviews"], form input[name="capacity"]').forEach((i) =>
     i.addEventListener("input", () => (i.dataset.touched = "1")));
+
+  // ---------------- 分配批次审计
+  // 创建不可变批次快照
+  $("#form-batch").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const note = e.target.note.value.trim();
+    await runAction(api("/api/batches", {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    }), note ? `批次快照已创建（备注：${note}）` : "批次快照已创建");
+    e.target.reset();
+  });
+
+  // 时间线按钮（事件委托）：查看快照 / 相邻对比 / 选择回滚目标
+  document.body.addEventListener("click", async (e) => {
+    const detailBtn = e.target.closest("[data-batch-detail]");
+    const diffBtn = e.target.closest("[data-diff]");
+    const rbSelectBtn = e.target.closest("[data-rb-select]");
+    if (detailBtn) {
+      await showBatchDetail(Number(detailBtn.dataset.batchDetail));
+    } else if (diffBtn) {
+      $("#diff-base").value = diffBtn.dataset.diff;
+      $("#diff-target").value = diffBtn.dataset.diffTarget;
+      $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === "batches"));
+      $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-batches"));
+      await loadBatchDiff();
+    } else if (rbSelectBtn) {
+      $("#rb-batch").value = rbSelectBtn.dataset.rbSelect;
+      $("#rollback-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      toast("已选择回滚目标批次，请点击「生成回滚预检」");
+    }
+  });
+
+  async function loadBatchDiff() {
+    const baseId = Number($("#diff-base").value);
+    const targetId = Number($("#diff-target").value);
+    if (!baseId || !targetId) return toast("请先创建至少两个批次", true);
+    if (baseId === targetId) return toast("请选择两个不同的批次", true);
+    try {
+      const d = await api(`/api/batches/${baseId}/diff/${targetId}`);
+      d.base_id = baseId;
+      d.target_id = targetId;
+      d.created_at = new Date().toLocaleString("zh-CN", { hour12: false });
+      batchDiff = d;
+      renderBatchDiff();
+    } catch (err) { toast(err.message, true); }
+  }
+
+  $("#btn-batch-diff").addEventListener("click", loadBatchDiff);
+
+  // 改选回滚目标批次后，旧预检属于其他批次：清除以免误操作
+  $("#rb-batch").addEventListener("change", () => {
+    if (rollbackPreview) {
+      rollbackPreview = null;
+      renderRollback();
+      toast("已切换回滚目标批次，请重新生成预检");
+    }
+  });
+
+  // 回滚预检（只读，内存影子库模拟）
+  $("#btn-rb-preview").addEventListener("click", async () => {
+    const batchId = Number($("#rb-batch").value);
+    if (!batchId) return toast("请先选择要回滚到的批次", true);
+    const btn = $("#btn-rb-preview");
+    btn.disabled = true;
+    try {
+      rollbackPreview = await api(`/api/batches/${batchId}/rollback/preview`, { method: "POST" });
+      renderRollback();
+      toast(rollbackPreview.can_rollback
+        ? "回滚预检通过：可执行原子回滚（尚未写入任何数据）"
+        : `回滚预检未通过：${rollbackPreview.blockers.length} 项阻塞，已整单拒绝`);
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // 执行原子回滚
+  $("#btn-rb-run").addEventListener("click", async () => {
+    if (!rollbackPreview || !rollbackPreview.can_rollback) return;
+    const b = rollbackPreview.batch;
+    if (!confirm(`确认回滚到批次 #${b.id}？\n\n` +
+      `· 仅恢复批次内仍存在的稿件/评审人属性、配对（锁定/主审）与冲突约束；\n` +
+      `· 批次之后新建的稿件/评审人保留；\n` +
+      `· 快照锁定将恢复，自由配对以历史配对优先重算，求解参数（β/α/γ）恢复为批次值；\n` +
+      `· 成功后会新增一个回滚批次，历史批次不改写；\n` +
+      `· 预检通过后若数据又被改动（如新增锁定），执行会在单个事务内再次校验并整单拒绝。`)) return;
+    const note = $("#rb-note").value.trim();
+    const btn = $("#btn-rb-run");
+    btn.disabled = true;
+    try {
+      const data = await api(`/api/batches/${b.id}/rollback`, {
+        method: "POST",
+        body: JSON.stringify({ note }),
+      });
+      state = data;
+      rollbackPreview = null;
+      $("#rb-note").value = "";
+      render();
+      toast(`已原子回滚到批次 #${b.id}，并写入新批次 #${data.batch.id}`);
+    } catch (err) {
+      // 预检后并发改动导致执行期拒绝：重新拉取预检以展示最新阻塞
+      try {
+        rollbackPreview = await api(`/api/batches/${b.id}/rollback/preview`, { method: "POST" });
+        renderRollback();
+      } catch (_) { /* ignore */ }
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("#btn-rb-clear").addEventListener("click", () => {
+    rollbackPreview = null;
+    renderRollback();
+  });
 }
 
 /* --------------------------------------------------------------- 启动 */

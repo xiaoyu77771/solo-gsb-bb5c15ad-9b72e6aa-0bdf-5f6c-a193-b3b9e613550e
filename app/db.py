@@ -112,6 +112,27 @@ CREATE TABLE IF NOT EXISTS conflict_declarations (
 -- 每位评审人至多存在一个待提交链接：重新签发会把旧链接顶替为 revoked
 CREATE UNIQUE INDEX IF NOT EXISTS idx_declarations_one_pending_per_reviewer
     ON conflict_declarations(reviewer_id) WHERE status = 'pending';
+
+-- 分配批次审计：成功求解或锁定变更后，管理员可创建的**不可变**批次快照。
+-- 快照正文 snapshot（JSON）记录当时的稿件/评审人实体信息、稿件—评审人配对
+-- （含主审标记 is_lead 与锁定状态 locked）、冲突约束、求解参数（β/α/γ）、
+-- 上次求解指标摘要；params_hash 为快照规范化 JSON 的 SHA-256（完整性校验）。
+-- kind='rollback' 的批次是“按某历史批次原子回滚”后自动写入的新批次
+-- （rollback_of 指向来源批次）；回滚只新增批次，绝不改写或删除历史批次。
+CREATE TABLE IF NOT EXISTS assignment_batches (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at     TEXT NOT NULL,
+    kind           TEXT NOT NULL DEFAULT 'snapshot'
+                   CHECK (kind IN ('snapshot','rollback')),
+    note           TEXT NOT NULL DEFAULT '',   -- 管理员备注（rollback 批次记录回滚说明）
+    snapshot       TEXT NOT NULL,              -- 不可变快照正文（JSON）
+    params_hash    TEXT NOT NULL,               -- 快照完整性哈希（SHA-256 hex）
+    rollback_of    INTEGER REFERENCES assignment_batches(id),  -- 仅 rollback 批次：来源批次
+    pair_count     INTEGER NOT NULL DEFAULT 0,
+    locked_count   INTEGER NOT NULL DEFAULT 0,
+    lead_count     INTEGER NOT NULL DEFAULT 0,
+    conflict_count INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -145,6 +166,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
       签发稿件清单快照与版本哈希、状态）。新表由 SCHEMA 中的
       CREATE TABLE IF NOT EXISTS 在建库脚本里幂等创建，旧库启动时自动获得，
       这里再做一次存在性兜底（针对仅执行迁移而不执行完整 SCHEMA 的场景）。
+    - assignment_batches：分配批次审计表（不可变快照 + 回滚来源批次）。
+      同样由 SCHEMA 幂等创建，这里再做存在性兜底。
     新版本引入的设置项由 init_db 中的 INSERT OR IGNORE 补默认值。
     """
     rcols = {r["name"] for r in conn.execute("PRAGMA table_info(reviewers)")}
@@ -177,6 +200,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
             );
             CREATE UNIQUE INDEX idx_declarations_one_pending_per_reviewer
                 ON conflict_declarations(reviewer_id) WHERE status = 'pending';
+            """)
+    # 分配批次审计表幂等兜底：与 SCHEMA 中定义保持一致
+    if "assignment_batches" not in tables:
+        conn.executescript(
+            """
+            CREATE TABLE assignment_batches (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at     TEXT NOT NULL,
+                kind           TEXT NOT NULL DEFAULT 'snapshot'
+                               CHECK (kind IN ('snapshot','rollback')),
+                note           TEXT NOT NULL DEFAULT '',
+                snapshot       TEXT NOT NULL,
+                params_hash    TEXT NOT NULL,
+                rollback_of    INTEGER REFERENCES assignment_batches(id),
+                pair_count     INTEGER NOT NULL DEFAULT 0,
+                locked_count   INTEGER NOT NULL DEFAULT 0,
+                lead_count     INTEGER NOT NULL DEFAULT 0,
+                conflict_count INTEGER NOT NULL DEFAULT 0
+            );
             """)
 
 

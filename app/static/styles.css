@@ -312,3 +312,19 @@ table.matrix { border-collapse: collapse; width: 100%; min-width: 500px; }
 .decl-badge.decl-stale { background: #fbe3e0; color: #b03a2e; }
 .decl-badge.decl-submitted { background: var(--green-soft); color: var(--green); }
 .decl-badge.decl-revoked { background: #eef1f7; color: var(--muted); }
+
+/* ---------------- 分配批次审计 ---------------- */
+.batch-row { align-items: flex-start; }
+.batch-kind {
+  display: inline-block; border-radius: 20px; padding: 2px 10px; font-size: 12px;
+  font-weight: 600; margin-right: 4px;
+}
+.batch-kind.snap { background: var(--brand-soft); color: #2c4bb0; }
+.batch-kind.rb { background: #f1e6fd; color: #7d2eb8; }
+.batch-note { font-weight: 500; color: var(--ink); font-size: 13px; }
+#rb-batch, #diff-base, #diff-target {
+  padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px;
+  font-size: 13.5px; font-family: inherit; background: #fff;
+}
+.btn.danger:not(.danger-ghost) { background: var(--red); border-color: var(--red); color: #fff; }
+.btn.danger:not(.danger-ghost):hover { background: #a83232; }

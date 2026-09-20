@@ -28,6 +28,7 @@
     <button class="tab" data-tab="reviewers">评审人</button>
     <button class="tab" data-tab="conflicts">作者冲突</button>
     <button class="tab" data-tab="declarations">利益冲突申报</button>
+    <button class="tab" data-tab="batches">📦 批次审计</button>
   </nav>
 
   <main>
@@ -211,6 +212,81 @@
           </p>
         </div>
         <div id="declaration-list"></div>
+      </div>
+    </section>
+
+    <!-- ============================ 分配批次审计 ============================ -->
+    <section id="tab-batches" class="tab-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>📦 不可变分配批次快照</h2>
+          <p class="hint">
+            每次<strong>成功求解或锁定变更后</strong>，可把当前的稿件—评审人配对、
+            <strong>主审标记 ⭐、锁定状态 🔒、冲突约束、求解参数（β/α/γ）</strong>与备注
+            固化为一个<strong>不可变批次</strong>。批次一经创建<strong>不能修改或删除</strong>；
+            可按时间查看任意两个批次的差异，并对历史批次发起<strong>原子回滚</strong>——
+            回滚仅恢复批次时仍存在的稿件、评审人及冲突约束，批次之后新建的实体保留；
+            遇到<strong>已删除对象或当前锁定冲突则整单拒绝</strong>并逐条说明原因；
+            成功后会<strong>新增一个回滚批次</strong>，历史批次一律不改写。
+          </p>
+        </div>
+        <form id="form-batch" class="form-row">
+          <input type="text" name="note" placeholder="批次备注（可选，如：第一轮定稿 / 锁定 3 篇后）" maxlength="500" />
+          <button class="btn primary" type="submit">📸 创建批次快照</button>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>批次时间线</h2>
+          <p class="hint">按时间升序；点击「查看差异」对比相邻批次（也可在下方自选两个批次）。回滚批次以 ↩️ 标识并注明来源批次。</p>
+        </div>
+        <div id="batch-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>🔍 批次差异对比</h2>
+          <p class="hint">选择基准批次与目标批次，查看目标相对基准的配对增删、锁定/主审变化、冲突与求解参数变化。</p>
+        </div>
+        <div class="settings-grid">
+          <label>基准批次（之前）
+            <select id="diff-base"></select>
+          </label>
+          <label>目标批次（之后）
+            <select id="diff-target"></select>
+          </label>
+          <div class="settings-actions">
+            <button id="btn-batch-diff" class="btn">🔍 查看差异</button>
+          </div>
+        </div>
+        <div id="batch-diff-result"></div>
+      </div>
+
+      <div class="panel" id="rollback-panel">
+        <div class="panel-head">
+          <h2>↩️ 按批次原子回滚</h2>
+          <p class="hint">
+            先选择目标批次并「生成回滚预检」：系统在<strong>内存影子库</strong>中模拟，<strong>不写入任何真实数据</strong>。
+            预检逐条给出<strong>阻塞原因</strong>（批次中的稿件/评审人已删除、回滚会移除或降级<strong>当前锁定</strong>、
+            目标锁定与当前冲突重合）——存在任一项即<strong>整单拒绝</strong>；通过预检则展示预计的配对/冲突/参数/实体属性变化、
+            无法恢复的历史自由配对与重算告警。确认「执行原子回滚」后在<strong>单个事务</strong>内恢复并写入<strong>新批次</strong>。
+          </p>
+        </div>
+        <div class="settings-grid">
+          <label>回滚到批次
+            <select id="rb-batch"></select>
+          </label>
+          <label>新批次备注（可选）
+            <input type="text" id="rb-note" maxlength="500" placeholder="默认：按批次 #N 原子回滚后自动创建" />
+          </label>
+          <div class="settings-actions">
+            <button id="btn-rb-preview" class="btn">🧪 生成回滚预检</button>
+            <button id="btn-rb-run" class="btn danger" disabled>↩️ 执行原子回滚</button>
+            <button id="btn-rb-clear" class="btn ghost" disabled>清除预检</button>
+          </div>
+        </div>
+        <div id="rollback-result"></div>
       </div>
     </section>
   </main>
