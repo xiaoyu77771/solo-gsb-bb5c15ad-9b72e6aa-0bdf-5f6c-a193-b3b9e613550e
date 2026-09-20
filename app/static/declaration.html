@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>利益冲突自助申报</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <style>
+    body { background: var(--bg); }
+    .decl-wrap { max-width: 720px; margin: 40px auto; padding: 0 16px; }
+    .decl-head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+    .decl-head .logo { font-size: 30px; }
+    .decl-list { margin-top: 6px; }
+    .decl-item {
+      display: flex; align-items: flex-start; gap: 10px; padding: 11px 6px;
+      border-bottom: 1px solid var(--line);
+    }
+    .decl-item:last-child { border-bottom: none; }
+    .decl-item input[type="checkbox"] { width: 17px; height: 17px; margin-top: 2px; accent-color: var(--red); }
+    .decl-item .m-title { font-weight: 600; line-height: 1.5; }
+    .decl-footer { margin-top: 18px; display: flex; justify-content: flex-end; gap: 10px; }
+    .status-banner { border-radius: 10px; padding: 14px 16px; font-size: 14px; }
+    .status-banner.ok { background: var(--green-soft); border: 1px solid #bfe6d1; color: #115c39; }
+    .status-banner.bad { background: var(--red-soft); border: 1px solid #f2c3c3; color: #7c2222; }
+    .status-banner.warn { background: var(--amber-soft); border: 1px solid #ecd9a8; color: #6d4c0f; }
+    .decl-meta { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="decl-wrap">
+    <div class="decl-head">
+      <span class="logo">⚖️</span>
+      <div>
+        <h1>利益冲突自助申报</h1>
+        <p class="subtitle" id="decl-subtitle">请勾选与您存在利益冲突的稿件</p>
+      </div>
+    </div>
+
+    <div id="decl-message"></div>
+
+    <div class="panel" id="decl-panel" style="display:none">
+      <div class="panel-head">
+        <h2 id="decl-reviewer"></h2>
+        <p class="hint">以下为管理员签发本链接时的稿件清单（仅显示标题）。请勾选您存在利益冲突、
+          不应参与评审的稿件；不了解的稿件无需勾选。提交后链接立即失效，不能重复提交。</p>
+        <p class="hint" style="color:var(--red)">注意：未勾选不会移除此前已登记的冲突。</p>
+      </div>
+      <div id="decl-stale"></div>
+      <div class="decl-list" id="decl-list"></div>
+      <div class="decl-footer">
+        <button id="btn-submit" class="btn primary">提交申报</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/declaration.js"></script>
+</body>
+</html>

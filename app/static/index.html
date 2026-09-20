@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>匿名评审分配系统</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⚖️</span>
+      <div>
+        <h1>匿名评审分配系统</h1>
+        <p class="subtitle">最小费用最大流 · 冲突/机构多样性/主审资格硬约束 · 主题匹配与负载均衡联合优化</p>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btn-solve" class="btn primary">▶ 重新求解分配</button>
+      <button id="btn-demo" class="btn ghost">载入演示数据</button>
+      <button id="btn-reset" class="btn danger-ghost">清空全部</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="overview">分配结果</button>
+    <button class="tab" data-tab="manuscripts">稿件</button>
+    <button class="tab" data-tab="reviewers">评审人</button>
+    <button class="tab" data-tab="conflicts">作者冲突</button>
+    <button class="tab" data-tab="declarations">利益冲突申报</button>
+  </nav>
+
+  <main>
+    <!-- ============================ 分配结果 ============================ -->
+    <section id="tab-overview" class="tab-panel active">
+      <div id="summary-cards" class="summary-grid"></div>
+
+      <div id="warnings-box"></div>
+      <div id="unmet-box"></div>
+
+      <div class="panel" id="relief-panel">
+        <div class="panel-head">
+          <h2>💡 缺口解困建议（单步临时调整试算）</h2>
+          <p class="hint">
+            仅当当前分配存在<strong>人数缺口或主审缺口</strong>时可生成。系统枚举三类<strong>单步</strong>临时调整——
+            某评审人<strong>容量临时 +1</strong>、当前<strong>同机构上限临时放宽 1</strong>、
+            为某评审人<strong>临时补充主审资格</strong>，复用求解器在内存中重算，
+            按<strong>总缺口减少 → 主审缺口减少 → 改动配对数 → 成本增量</strong>排序。
+            每条建议展示受影响稿件及新旧配对。所有试算<strong>只读</strong>，不会改写设置、评审人、分配、锁定或上次求解结果；
+            建议仅供参考，采纳需到对应页面手工调整后重新求解。
+          </p>
+        </div>
+        <div class="settings-actions">
+          <button id="btn-relief-generate" class="btn">💡 生成解困建议</button>
+          <button id="btn-relief-clear" class="btn ghost" disabled>清除结果</button>
+        </div>
+        <div id="relief-result"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>完整分配</h2>
+          <p class="hint">点击评审人徽章上的 🔒 可锁定/解锁该既有分配；锁定立即重新求解并占用容量。也可用“锁定其他评审人”手工锁定。</p>
+        </div>
+        <div id="assignment-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>评审人负载</h2></div>
+        <div id="reviewer-load"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>🚪 退出补位（评审人临时退出修复）</h2>
+          <p class="hint">
+            选择一名<strong>临时退出</strong>的评审人并「生成修复预览」：系统排除该评审人后，
+            在现有<strong>锁定、冲突、容量、主审资格与机构约束</strong>下重排（只读，不写入）。
+            优化目标依次为<strong>最大化满足人数 → 最少改动既有非锁定配对 → 最低原求解成本</strong>，
+            允许必要的连锁换位；预览展示新增/移除配对、连锁换位与各稿缺口变化。
+            「采用修复方案」仅在版本指纹仍一致时于<strong>单个事务</strong>内写入，过期返回 409 且不写入。
+            退出者的锁定配对无法跨人保留，将随退出一并移除；其余评审人的锁定全部保留。
+          </p>
+        </div>
+        <div class="settings-grid">
+          <label>临时退出的评审人
+            <select id="bf-reviewer"></select>
+          </label>
+          <div class="settings-actions">
+            <button id="btn-backfill-preview" class="btn">🚪 生成修复预览</button>
+            <button id="btn-backfill-adopt" class="btn primary" disabled>✅ 采用修复方案</button>
+            <button id="btn-backfill-clear" class="btn ghost" disabled>清除预览</button>
+          </div>
+        </div>
+        <div id="backfill-result"></div>
+      </div>
+
+      <details class="panel settings-panel">
+        <summary class="panel-head"><h2>求解参数与默认值</h2></summary>
+        <div class="settings-grid">
+          <label>默认每稿评审数
+            <input type="number" id="set-default-req" min="1" max="20" />
+          </label>
+          <label>默认个人容量
+            <input type="number" id="set-default-cap" min="0" max="50" />
+          </label>
+          <label>主题不匹配权重 β
+            <input type="number" id="set-beta" min="0" />
+          </label>
+          <label>负载偏差权重 α
+            <input type="number" id="set-alpha" min="0" />
+          </label>
+          <label>每篇稿件同机构最多人数（0 关闭）
+            <input type="number" id="set-inst-cap" min="0" max="20" />
+          </label>
+          <div class="settings-actions">
+            <button id="btn-save-settings" class="btn">保存设置</button>
+            <span class="hint">权重修改后请点击“重新求解分配”生效。</span>
+          </div>
+        </div>
+
+        <div class="sandbox-box">
+          <h3>🧪 方案沙盒</h3>
+          <p class="hint">
+            输入<strong>临时</strong>参数并「生成预览」：仅在内存中重算，<strong>不改动</strong>当前设置、分配、锁定与上次求解结果。
+            预览展示与当前方案相比的新增/移除评审配对、总成本、未满足人数与主审缺口变化，并绑定数据版本指纹。
+            「采用该方案」仅在指纹仍一致时于<strong>单个事务</strong>内写入临时参数与预览分配；
+            若预览期间数据已被修改，采用将返回 409，需重新生成预览。
+          </p>
+          <div class="settings-grid">
+            <label>临时主题不匹配权重 β
+              <input type="number" id="sb-beta" min="0" max="100000" />
+            </label>
+            <label>临时负载偏差权重 α
+              <input type="number" id="sb-alpha" min="0" max="100000" />
+            </label>
+            <label>临时每篇同机构最多人数（0 关闭）
+              <input type="number" id="sb-inst-cap" min="0" max="20" />
+            </label>
+            <div class="settings-actions">
+              <button id="btn-sandbox-preview" class="btn">🧪 生成预览</button>
+              <button id="btn-sandbox-adopt" class="btn primary" disabled>✅ 采用该方案</button>
+              <button id="btn-sandbox-clear" class="btn ghost" disabled>清除预览</button>
+            </div>
+          </div>
+          <div id="sandbox-result"></div>
+        </div>
+      </details>
+    </section>
+
+    <!-- ============================ 稿件 ============================ -->
+    <section id="tab-manuscripts" class="tab-panel">
+      <div class="panel">
+        <div class="panel-head"><h2>录入稿件</h2></div>
+        <form id="form-manuscript" class="form-row">
+          <input type="text" name="title" placeholder="稿件主题 / 标题" required maxlength="200" />
+          <input type="text" name="topics" placeholder="主题（逗号分隔，如：机器学习, nlp）" />
+          <input type="number" name="required_reviews" placeholder="所需评审数" min="1" max="20" />
+          <input type="number" name="required_leads" placeholder="需主审人数（0-2）" min="0" max="2" />
+          <button class="btn primary" type="submit">添加稿件</button>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>稿件列表</h2></div>
+        <div id="manuscript-list"></div>
+      </div>
+    </section>
+
+    <!-- ============================ 评审人 ============================ -->
+    <section id="tab-reviewers" class="tab-panel">
+      <div class="panel">
+        <div class="panel-head"><h2>录入评审人</h2></div>
+        <form id="form-reviewer" class="form-row">
+          <input type="text" name="name" placeholder="评审人姓名 / 代号" required maxlength="100" />
+          <input type="text" name="topics" placeholder="擅长主题（逗号分隔）" />
+          <input type="text" name="institution" placeholder="所属机构（可选，留空不计入机构上限）" maxlength="120" />
+          <input type="number" name="capacity" placeholder="个人容量" min="0" max="50" />
+          <label class="checkbox-label" title="是否可担任主审（主审资格硬约束）">
+            <input type="checkbox" name="can_lead" /> 可任主审
+          </label>
+          <button class="btn primary" type="submit">添加评审人</button>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>评审人列表</h2></div>
+        <div id="reviewer-list"></div>
+      </div>
+    </section>
+
+    <!-- ============================ 冲突 ============================ -->
+    <section id="tab-conflicts" class="tab-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>作者冲突矩阵</h2>
+          <p class="hint">勾选表示该稿件与该评审人存在作者冲突；冲突边在求解图中根本不会建立，因此绝不可能被分配。已锁定的分配需先解锁才能勾选冲突。</p>
+        </div>
+        <div id="conflict-matrix" class="matrix-wrap"></div>
+      </div>
+    </section>
+
+    <!-- ===================== 利益冲突自助申报 ===================== -->
+    <section id="tab-declarations" class="tab-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>利益冲突自助申报链接</h2>
+          <p class="hint">
+            为评审人生成<strong>一次性</strong>申报链接：链接绑定签发时的稿件清单版本，评审人仅能看到稿件标题并勾选冲突，
+            提交后勾选结果在单个事务中合并进冲突矩阵，链接立即失效。<br/>
+            签发后若稿件有增删或标题变化，评审人的提交将返回 <strong>409 且不写入</strong>，状态会标记「清单已变化」，请重新生成链接。
+            每位评审人至多有一个待提交链接；重新生成会使旧链接失效。
+          </p>
+        </div>
+        <div id="declaration-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 申报链接弹窗（明文链接仅生成后展示这一次） -->
+  <div id="link-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>申报链接已生成</h3>
+      <p class="hint" id="link-modal-desc"></p>
+      <label style="font-size:12.5px;color:var(--muted);display:block;margin:12px 0 6px">
+        请立即复制并发送给评审人；关闭本窗口后无法再次查看完整链接。
+        <input type="text" id="link-modal-input" readonly
+          style="width:100%;margin-top:6px;font-size:12.5px;background:#f7f9fd" />
+      </label>
+      <div class="modal-actions">
+        <button id="link-modal-copy" class="btn">复制链接</button>
+        <button id="link-modal-close" class="btn primary">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用编辑弹窗 -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="modal-title"></h3>
+      <div id="modal-body"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn ghost">取消</button>
+        <button id="modal-ok" class="btn primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
