@@ -112,6 +112,33 @@ CREATE TABLE IF NOT EXISTS conflict_declarations (
 -- 每位评审人至多存在一个待提交链接：重新签发会把旧链接顶替为 revoked
 CREATE UNIQUE INDEX IF NOT EXISTS idx_declarations_one_pending_per_reviewer
     ON conflict_declarations(reviewer_id) WHERE status = 'pending';
+
+-- 分配批次审计：每次成功求解/锁定变更后管理员可手动创建的不可变批次快照。
+-- 快照（snapshot，JSON）记录稿件—评审人配对、主审标记、锁定状态、求解参数与备注；
+-- 回滚成功后同样写入一条新批次（kind='rollback'），绝不改写历史。
+-- 该表为只增审计表：BEFORE UPDATE/DELETE 触发器在数据库层拒绝任何改写与删除，
+-- /api/reset、/api/demo 也不清空该表，批次历史在重置/重载演示数据后仍然保留。
+CREATE TABLE IF NOT EXISTS assignment_batches (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at       TEXT NOT NULL,
+    kind             TEXT NOT NULL DEFAULT 'snapshot'
+                     CHECK (kind IN ('snapshot','rollback')),
+    rolled_back_from INTEGER,            -- 回滚批次：源批次 ID；手动快照为 NULL
+    note             TEXT NOT NULL DEFAULT '',
+    snapshot         TEXT NOT NULL       -- 批次快照（规范化 JSON，含配对/主审/锁定/参数）
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_assignment_batches_no_update
+BEFORE UPDATE ON assignment_batches
+BEGIN
+    SELECT RAISE(ABORT, 'assignment_batches 为不可变审计表，禁止 UPDATE');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_assignment_batches_no_delete
+BEFORE DELETE ON assignment_batches
+BEGIN
+    SELECT RAISE(ABORT, 'assignment_batches 为不可变审计表，禁止 DELETE');
+END;
 """
 
 
@@ -145,6 +172,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
       签发稿件清单快照与版本哈希、状态）。新表由 SCHEMA 中的
       CREATE TABLE IF NOT EXISTS 在建库脚本里幂等创建，旧库启动时自动获得，
       这里再做一次存在性兜底（针对仅执行迁移而不执行完整 SCHEMA 的场景）。
+    - assignment_batches：分配批次审计表（不可变批次快照），同样幂等兜底，
+      并在数据库层安装禁止 UPDATE/DELETE 的触发器，确保历史不可改写。
     新版本引入的设置项由 init_db 中的 INSERT OR IGNORE 补默认值。
     """
     rcols = {r["name"] for r in conn.execute("PRAGMA table_info(reviewers)")}
@@ -177,6 +206,29 @@ def _migrate(conn: sqlite3.Connection) -> None:
             );
             CREATE UNIQUE INDEX idx_declarations_one_pending_per_reviewer
                 ON conflict_declarations(reviewer_id) WHERE status = 'pending';
+            """)
+    if "assignment_batches" not in tables:
+        conn.executescript(
+            """
+            CREATE TABLE assignment_batches (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at       TEXT NOT NULL,
+                kind             TEXT NOT NULL DEFAULT 'snapshot'
+                                 CHECK (kind IN ('snapshot','rollback')),
+                rolled_back_from INTEGER,
+                note             TEXT NOT NULL DEFAULT '',
+                snapshot         TEXT NOT NULL
+            );
+            CREATE TRIGGER trg_assignment_batches_no_update
+            BEFORE UPDATE ON assignment_batches
+            BEGIN
+                SELECT RAISE(ABORT, 'assignment_batches 为不可变审计表，禁止 UPDATE');
+            END;
+            CREATE TRIGGER trg_assignment_batches_no_delete
+            BEFORE DELETE ON assignment_batches
+            BEGIN
+                SELECT RAISE(ABORT, 'assignment_batches 为不可变审计表，禁止 DELETE');
+            END;
             """)
 
 

@@ -17,7 +17,9 @@ async function api(path, options = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.detail || `请求失败（${res.status}）`);
+    const err = new Error(data.detail || `请求失败（${res.status}）`);
+    err.reasons = data.reasons || [];
+    throw err;
   }
   return data;
 }
@@ -47,6 +49,171 @@ async function runAction(promise, okMsg) {
     toast(e.message, true);
     throw e;
   }
+}
+
+/* --------------------------------------------------------------- 分配批次审计 */
+let batchDetailId = null;      // 当前展开快照详情的批次 ID
+let batchDiffData = null;      // 最近一次差异对比结果
+let batchRejectBox = null;     // { batchId, message, reasons[] } 回滚整单拒绝原因
+const batchDetailCache = new Map();  // 批次详情缓存（跨整页状态刷新保留）
+
+function batchRefName(p) {
+  // 已删除对象用红色占位（回滚会因此整单拒绝）
+  const m = p.manuscript_deleted
+    ? `<span class="deleted-ref">稿件 #${p.manuscript_id}（已删除）</span>`
+    : `《${esc(p.manuscript_title || "")}》`;
+  const r = p.reviewer_deleted
+    ? `<span class="deleted-ref">评审人 #${p.reviewer_id}（已删除）</span>`
+    : esc(p.reviewer_name || "");
+  return `${m} ← ${r}`;
+}
+
+function pairMarks(p) {
+  const marks = [];
+  if (p.locked) marks.push('<span class="tag locked-tag">🔒 锁定</span>');
+  if (p.is_lead) marks.push('<span class="tag lead-tag">⭐ 主审</span>');
+  return marks.join(" ");
+}
+
+function renderBatchList() {
+  const box = $("#batch-list");
+  const batches = state.batches || [];
+  if (!batches.length) {
+    box.innerHTML = `<div class="empty">还没有批次快照。成功求解或调整锁定后，在上方填写备注并创建第一个批次。</div>`;
+    return;
+  }
+  box.innerHTML = batches.map((b) => {
+    const kindBadge = b.kind === "rollback"
+      ? `<span class="batch-kind rollback">↩️ 回滚批次（源自 #${b.rolled_back_from}）</span>`
+      : `<span class="batch-kind">📸 手动快照</span>`;
+    const rejectHtml = batchRejectBox && batchRejectBox.batchId === b.id
+      ? `<div class="batch-reject"><strong>⛔ ${esc(batchRejectBox.message)}</strong>
+           <ul>${batchRejectBox.reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`
+      : "";
+    return `<div class="batch-row ${b.kind === "rollback" ? "is-rollback" : ""}">
+      <div class="batch-main">
+        <div class="batch-title">#${b.id} ${kindBadge}
+          <span class="batch-hash"><code>${esc((b.content_hash || "").slice(0, 12))}…</code></span>
+        </div>
+        <div class="batch-meta">
+          ${esc(b.created_at)} ｜ 配对 ${b.pair_count} 个 · 🔒 锁定 ${b.locked_count} · ⭐ 主审 ${b.lead_count}
+          ｜ 参数 β=${b.params.mismatch_weight} · α=${b.params.load_weight} · 机构上限=${b.params.institution_cap}
+        </div>
+        ${b.note ? `<div class="batch-note">📝 ${esc(b.note)}</div>` : ""}
+        ${rejectHtml}
+      </div>
+      <div class="entity-actions">
+        <button class="btn small" data-batch-view="${b.id}">
+          ${batchDetailId === b.id ? "收起配对" : "查看配对"}</button>
+        <button class="btn small danger" data-batch-rollback="${b.id}">↩️ 回滚到此批次</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function renderBatchDiffSelects() {
+  const batches = state.batches || [];
+  const fill = (sel, preferred) => {
+    if (!sel) return;
+    sel.innerHTML = batches.length
+      ? batches.map((b) => {
+        const tag = b.kind === "rollback" ? "↩️" : "📸";
+        const note = b.note ? ` · ${b.note.slice(0, 20)}` : "";
+        return `<option value="${b.id}">${tag} #${b.id}（${esc(b.created_at)}${esc(note)}）</option>`;
+      }).join("")
+      : '<option value="">（暂无批次）</option>';
+    if (preferred && batches.some((b) => b.id === preferred)) sel.value = String(preferred);
+  };
+  // 默认：最新批次 → 倒数第二个批次（A 较早、B 较新）
+  const defFrom = batches[0]?.id;
+  const defTo = batches[1]?.id ?? defFrom;
+  fill($("#batch-diff-from"), batchDiffData?.from_batch?.id ?? defFrom);
+  fill($("#batch-diff-to"), batchDiffData?.to_batch?.id ?? defTo);
+  $("#btn-batch-diff").disabled = batches.length < 1;
+}
+
+function renderBatchDetail() {
+  const box = $("#batch-detail");
+  if (!batchDetailId) {
+    box.innerHTML = `<div class="empty">在上方批次时间线中点击「查看配对」展开。</div>`;
+    return;
+  }
+  // 优先用已拉取的详情缓存；否则异步拉取
+  if (!batchDetailCache.has(batchDetailId)) {
+    box.innerHTML = `<div class="empty">加载中…</div>`;
+    api(`/api/batches/${batchDetailId}`).then((b) => {
+      batchDetailCache.set(b.id, b);
+      if (batchDetailId === b.id) renderBatchDetail();
+    }).catch((e) => { box.innerHTML = `<div class="alert danger">${esc(e.message)}</div>`; });
+    return;
+  }
+  const b = batchDetailCache.get(batchDetailId);
+  box.innerHTML = `<div class="sandbox-result-inner">
+    <div class="sandbox-meta">
+      批次 #${b.id}（${b.kind === "rollback" ? `↩️ 回滚批次，源自 #${b.rolled_back_from}` : "📸 手动快照"}）
+      ｜ ${esc(b.created_at)} ｜ 配对 ${b.pair_count} · 锁定 ${b.locked_count} · 主审 ${b.lead_count}
+      ｜ β=${b.params.mismatch_weight} · α=${b.params.load_weight} · 机构上限=${b.params.institution_cap}
+    </div>
+    ${b.note ? `<div class="batch-note">📝 ${esc(b.note)}</div>` : ""}
+    <div class="batch-pairs">
+      ${b.pairs.map((p) => `<div class="batch-pair-line">
+        ${p.locked ? "🔒" : "👤"} ${batchRefName(p)} ${pairMarks(p)}
+      </div>`).join("") || '<div class="hint">（空批次：当时没有任何分配）</div>'}
+    </div>
+  </div>`;
+}
+
+function renderBatchDiff() {
+  const box = $("#batch-diff-result");
+  const clearBtn = $("#btn-batch-diff-clear");
+  renderBatchDiffSelects();
+  if (!box) return;
+  if (!batchDiffData) {
+    box.innerHTML = "";
+    clearBtn.disabled = true;
+    return;
+  }
+  clearBtn.disabled = false;
+  const d = batchDiffData;
+  const s = d.summary;
+  const line = (x, sign, extra) =>
+    `<li>${sign} ${batchRefName(x)} ${extra || ""}</li>`;
+  const section = (title, items, sign, empty, extraFn) =>
+    `<div class="diff-section"><h4>${title}（${items.length}）</h4>` +
+    (items.length ? `<ul>${items.map((x) => line(x, sign, extraFn ? extraFn(x) : "")).join("")}</ul>`
+                  : `<div class="hint">${empty}</div>`) + `</div>`;
+
+  const paramHtml = d.param_changes.length
+    ? `<table class="sandbox-metrics">
+         <tr><th>求解参数</th><th>批次 A</th><th>批次 B</th></tr>
+         ${d.param_changes.map((c) =>
+           `<tr><td>${esc(c.param)}</td><td>${esc(c.before)}</td><td>${esc(c.after)}</td></tr>`).join("")}
+       </table>`
+    : '<div class="hint">求解参数无变化。</div>';
+
+  box.innerHTML = `<div class="sandbox-result-inner">
+    <div class="sandbox-meta">
+      A：#${d.from_batch.id}（${esc(d.from_batch.created_at)}）→
+      B：#${d.to_batch.id}（${esc(d.to_batch.created_at)}）
+      ｜ 配对 ${s.pairs_before} → ${s.pairs_after}
+      ｜ 新增 ${s.added} · 移除 ${s.removed} · 锁定变化 ${s.lock_changed} · 主审变化 ${s.lead_changed}
+    </div>
+    ${paramHtml}
+    <div class="sandbox-diff">
+      ${section("➕ B 中新增配对", d.added, "➕", "无新增配对", (x) => pairMarks(x))}
+      ${section("➖ B 中移除配对", d.removed, "➖", "无移除配对", (x) => pairMarks(x))}
+    </div>
+    ${section("🔒 锁定状态变化", d.lock_changed, "🔒", "无锁定变化",
+      (x) => `<span class="${x.locked_after ? "delta-up" : "delta-down"}">${x.locked_before ? "锁定" : "未锁"} → ${x.locked_after ? "锁定" : "未锁"}</span>`)}
+    ${section("⭐ 主审标记变化", d.lead_changed, "⭐", "无主审变化",
+      (x) => `<span class="${x.lead_after ? "delta-down" : "delta-same"}">${x.lead_before ? "主审" : "非主审"} → ${x.lead_after ? "主审" : "非主审"}</span>`)}
+  </div>`;
+}
+
+function renderBatches() {
+  renderBatchList();
+  renderBatchDiff();
+  renderBatchDetail();
 }
 
 /* --------------------------------------------------------------- 渲染：总览 */
@@ -828,6 +995,7 @@ function render() {
   renderSandbox();
   renderBackfill();
   renderRelief();
+  renderBatches();
 }
 
 /* --------------------------------------------------------------- 通用编辑弹窗 */
@@ -1234,6 +1402,78 @@ function bindEvents() {
   // 记录用户是否手动改过默认输入框
   $$('form input[name="required_reviews"], form input[name="capacity"]').forEach((i) =>
     i.addEventListener("input", () => (i.dataset.touched = "1")));
+
+  // ---------------- 分配批次审计
+  // 创建不可变批次快照
+  $("#form-batch").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    await runAction(api("/api/batches", {
+      method: "POST",
+      body: JSON.stringify({ note: f.note.value }),
+    }), "批次快照已创建（不可变审计记录）");
+    f.note.value = "";
+  });
+
+  // 批次列表：查看配对 / 回滚（事件委托）
+  $("#batch-list").addEventListener("click", async (e) => {
+    const viewBtn = e.target.closest("[data-batch-view]");
+    const rollbackBtn = e.target.closest("[data-batch-rollback]");
+    if (viewBtn) {
+      const id = Number(viewBtn.dataset.batchView);
+      batchDetailId = batchDetailId === id ? null : id;
+      renderBatchList();
+      renderBatchDetail();
+      return;
+    }
+    if (rollbackBtn) {
+      const id = Number(rollbackBtn.dataset.batchRollback);
+      if (!confirm(
+        `确认按批次 #${id} 原子回滚？\n\n` +
+        "· 仅恢复当时仍存在的稿件、评审人及当前冲突约束；\n" +
+        "· 快照引用的稿件/评审人若已删除，或存在批次之后新增的锁定、与当前冲突/容量/机构上限冲突的锁定，将整单拒绝（不写入任何内容）；\n" +
+        "· 成功后求解参数恢复为批次参数，配对替换为快照配对（按当前冲突重解），并写入一条新的回滚批次，历史批次不改写。")) return;
+      const btn = rollbackBtn;
+      btn.disabled = true;
+      try {
+        const data = await api(`/api/batches/${id}/rollback`, { method: "POST" });
+        state = data;
+        batchDetailCache.set(data.batch.id, data.batch);
+        batchDetailId = data.batch.id;
+        batchDiffData = null;
+        batchRejectBox = null;
+        render();
+        const skipped = data.skipped_conflict_pairs?.length || 0;
+        toast(skipped
+          ? `已回滚到批次 #${id} 并写入新批次 #${data.batch.id}；${skipped} 个非锁定配对因当前冲突未恢复`
+          : `已回滚到批次 #${id}，新批次 #${data.batch.id} 已写入（历史不改写）`);
+      } catch (err) {
+        // 409 整单拒绝：在该批次行内展示逐条原因（detail 与 reasons 均来自 JSON 响应）
+        batchRejectBox = { batchId: id, message: err.message, reasons: err.reasons || [] };
+        renderBatchList();
+        toast(err.message, true);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+  });
+
+  // 批次差异对比
+  $("#btn-batch-diff").addEventListener("click", async () => {
+    const fromId = Number($("#batch-diff-from").value);
+    const toId = Number($("#batch-diff-to").value);
+    if (!fromId || !toId) return toast("请选择两个批次", true);
+    try {
+      batchDiffData = await api(`/api/batches/${fromId}/diff/${toId}`);
+      renderBatchDiff();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  $("#btn-batch-diff-clear").addEventListener("click", () => {
+    batchDiffData = null;
+    renderBatchDiff();
+  });
 }
 
 /* --------------------------------------------------------------- 启动 */

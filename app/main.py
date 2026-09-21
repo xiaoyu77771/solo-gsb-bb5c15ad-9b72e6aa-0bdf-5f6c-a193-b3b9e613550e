@@ -23,9 +23,12 @@ from . import sandbox as sandbox_svc
 from .backfill import BackfillError
 from . import backfill as backfill_svc
 from . import relief as relief_svc
+from .audit import AuditError
+from . import audit as audit_svc
 from .schemas import (
     BackfillAdoptIn,
     BackfillPreviewIn,
+    BatchCreateIn,
     ConflictIn,
     DeclarationSubmitIn,
     LockIn,
@@ -66,6 +69,15 @@ def sandbox_error_handler(request: Request, exc: SandboxError):
 @app.exception_handler(BackfillError)
 def backfill_error_handler(request: Request, exc: BackfillError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
+
+
+@app.exception_handler(AuditError)
+def audit_error_handler(request: Request, exc: AuditError):
+    # 回滚整单拒绝时同时回传逐条原因，供前端原样列出
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message, "reasons": exc.reasons},
+    )
 
 
 # ------------------------------------------------------------- 状态序列化
@@ -135,6 +147,8 @@ def build_state(conn: sqlite3.Connection) -> dict:
         # 利益冲突自助申报链接状态（不含令牌明文/哈希）
         "declarations": decl_svc.list_declarations(conn),
         "solution": solution,
+        # 分配批次审计时间线（仅摘要；快照配对明细走 /api/batches/{id}）
+        "batches": audit_svc.list_batches(conn),
     }
 
 
@@ -489,6 +503,44 @@ def toggle_lock(body: LockIn, conn=Depends(get_conn)):
     # 锁定状态变化后立即重新求解：锁定边占用容量并参与负载计算
     solution = solve(conn)
     return build_state(conn) | {"solution": solution}
+
+
+# ------------------------------------------------------------- 分配批次审计
+@app.post("/api/batches")
+def create_batch(body: BatchCreateIn, conn=Depends(get_conn)):
+    """创建不可变批次快照：固化当前稿件—评审人配对、主审标记、锁定状态、
+    求解参数与备注。尚未成功求解时返回 400。批次只增不改。"""
+    batch = audit_svc.create_snapshot(conn, body.note)
+    return build_state(conn) | {"batch": batch}
+
+
+@app.get("/api/batches")
+def list_batches(conn=Depends(get_conn)):
+    """批次时间线（按时间倒序），仅含摘要；快照配对明细走 /api/batches/{id}。"""
+    return {"batches": audit_svc.list_batches(conn)}
+
+
+@app.get("/api/batches/{batch_id}")
+def get_batch(batch_id: int, conn=Depends(get_conn)):
+    """批次详情：快照全量配对（附带当前名称；对象已删除时标注 deleted）。"""
+    return audit_svc.get_batch(conn, batch_id)
+
+
+@app.get("/api/batches/{from_id}/diff/{to_id}")
+def batch_diff(from_id: int, to_id: int, conn=Depends(get_conn)):
+    """两个批次的配对级差异（from → to）：新增/移除配对、锁定变化、主审变化、参数变化。"""
+    return audit_svc.batch_diff(conn, from_id, to_id)
+
+
+@app.post("/api/batches/{batch_id}/rollback")
+def rollback_batch(batch_id: int, conn=Depends(get_conn)):
+    """按批次原子回滚：仅恢复仍存在的稿件、评审人及冲突约束。
+
+    遇到已删除对象或当前锁定冲突则整单 409 拒绝（reasons 逐条说明），
+    不写入任何内容；成功后写入新批次（kind='rollback'）且不改写历史。
+    """
+    result = audit_svc.rollback(conn, batch_id)
+    return build_state(conn) | result
 
 
 # ----------------------------------------------------------------- 演示/重置

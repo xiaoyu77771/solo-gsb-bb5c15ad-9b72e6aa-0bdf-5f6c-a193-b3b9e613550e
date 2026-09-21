@@ -88,6 +88,11 @@ class DeclarationSubmitIn(BaseModel):
     conflict_manuscript_ids: List[int] = Field(default_factory=list, max_length=1000)
 
 
+class BatchCreateIn(BaseModel):
+    """创建不可变批次快照：管理员备注（可空，最长 500 字）。"""
+    note: str = Field(default="", max_length=500)
+
+
 class TopicsIn(BaseModel):
     """仅用于前端校验的占位模型（当前未使用，保留扩展）。"""
 

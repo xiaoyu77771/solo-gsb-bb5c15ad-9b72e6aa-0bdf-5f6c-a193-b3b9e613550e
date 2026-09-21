@@ -28,6 +28,7 @@
     <button class="tab" data-tab="reviewers">评审人</button>
     <button class="tab" data-tab="conflicts">作者冲突</button>
     <button class="tab" data-tab="declarations">利益冲突申报</button>
+    <button class="tab" data-tab="batches">批次审计</button>
   </nav>
 
   <main>
@@ -211,6 +212,61 @@
           </p>
         </div>
         <div id="declaration-list"></div>
+      </div>
+    </section>
+
+    <!-- ===================== 分配批次审计 ===================== -->
+    <section id="tab-batches" class="tab-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>📸 创建批次快照</h2>
+          <p class="hint">
+            每次成功求解或锁定变更后，可将当前方案固化为<strong>不可变批次快照</strong>，
+            记录<strong>稿件—评审人配对、⭐ 主审标记、🔒 锁定状态、求解参数（β/α/机构上限）与备注</strong>。
+            批次只增不改（数据库层禁止改写与删除）；清空全部 / 载入演示数据也不会清除批次历史。
+          </p>
+        </div>
+        <form id="form-batch" class="form-row">
+          <input type="text" name="note" placeholder="批次备注（可选，如：第一轮初排 / 锁定两位主审后）" maxlength="500" />
+          <button class="btn primary" type="submit">📸 创建批次快照</button>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>批次时间线</h2>
+          <p class="hint">
+            按时间倒序展示全部批次；点击「查看配对」展开该批次快照，选择两个批次后「对比差异」可按时间查看
+            新增/移除配对、锁定变化、主审变化与参数变化。「回滚到此批次」在<strong>单个事务</strong>内原子恢复：
+            仅恢复当时仍存在的稿件、评审人及当前冲突约束，遇到已删除对象或当前锁定冲突则<strong>整单拒绝并说明原因</strong>；
+            成功后<strong>写入新批次</strong>（回滚批次），历史批次一律保留不改写。
+          </p>
+        </div>
+        <div id="batch-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>🔍 批次差异对比</h2>
+        </div>
+        <div class="settings-grid">
+          <label>较早批次（A）
+            <select id="batch-diff-from"></select>
+          </label>
+          <label>较晚批次（B）
+            <select id="batch-diff-to"></select>
+          </label>
+          <div class="settings-actions">
+            <button id="btn-batch-diff" class="btn">🔍 对比差异（A → B）</button>
+            <button id="btn-batch-diff-clear" class="btn ghost" disabled>清除</button>
+          </div>
+        </div>
+        <div id="batch-diff-result"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>批次快照详情</h2></div>
+        <div id="batch-detail"><div class="empty">在上方批次时间线中点击「查看配对」展开。</div></div>
       </div>
     </section>
   </main>
